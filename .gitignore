@@ -9,7 +9,4 @@ venv/
 .eggs/
 dist/
 build/
-payloads/*.html
-payloads/*.js
-!payloads/.gitkeep
 kexploit/
