@@ -239,7 +239,9 @@ self[1] = boxed_arr;
       try 
       {
           let url = "";
-          url = host + "/" + fname;
+          const _base = host.endsWith("/") ? host.slice(0, -1) : host;
+          const _path = fname.startsWith("/") ? fname : ("/" + fname);
+          url = _base + _path;
           print("trying to fetch from:" + url);
           let xhr = new XMLHttpRequest();
           xhr.open("GET", `${url}` , false);
